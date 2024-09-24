@@ -1,88 +1,90 @@
 // Hook to process after WPForms submission
-add_action( 'wpforms_process_complete', 'send_email_to_matching_dealerships', 10, 4 );
-function send_email_to_matching_dealerships( $fields, $entry, $form_data, $entry_id ) {
-    // Define the form IDs
-    $customer_form_id = 437; // Customer Form ID
-    $dealership_form_id = 235; // Dealerships Form ID
+add_filter('wpforms_entry_email_atts', function($email, $fields, $entry, $form_data, $notification_id) {
+    // Check if the form is the Customer Form (ID 437)
+    if ($form_data['id'] == 437) {
+        $log_file = WP_CONTENT_DIR . '/debug.log'; // Using the debug.log file for logging
 
-    // Check if the form is the Customer Form
-    if ( $form_data['id'] == $customer_form_id ) {
+        function log_message($message, $log_file) {
+            $time = date('Y-m-d H:i:s');
+            $log_entry = "[{$time}] - {$message}\n";
+            error_log($log_entry); // Log to debug.log
+        }
 
-        // Extract the user input from the Customer Form fields
-        $customer_name = $fields[28]['value']; // Customer Name field in Customer Form
-        $customer_email = $fields[3]['value']; // Customer Email field in Customer Form
-        $customer_phone = $fields[2]['value']; // Phone Number field in Customer Form
-        $customer_location = $fields[27]['value']; // Location field in Customer Form
-        $customer_manufacturer = $fields[25]['value']; // Manufacturer field in Customer Form
-        $customer_specificvehicle = $fields[5]['value']; // If the customer want a specific model
-        $customer_pricerange = $fields[26]['value']; // Customer Price Range
-        $customer_contactmethod = $fields[17]['value']; // Preferred Contact Method
-        $customer_financeoptions = $fields[6]['value']; // Finance Options
-        $customer_suggestions = $fields[21]['value']; // Is the customer open to suggestions
-        $customer_message = $fields[10]['value']; // Additional Information if needed
-        $customer_consent = $fields[11]['value']; // Customer consent to the terms of submitting their data
+        $submitted_manufacturer = isset($fields[25]['value']) ? $fields[25]['value'] : null;
+        $submitted_location = isset($fields[27]['value']) ? $fields[27]['value'] : null;
+        log_message("Submitted Manufacturer: " . $submitted_manufacturer, $log_file);
+        log_message("Submitted Location: " . $submitted_location, $log_file);
 
-				// *** Logging the captured form data ***
-				        error_log('Customer Manufacturer: ' . $customer_manufacturer);
-				        error_log('Customer Location: ' . $customer_location);
+        try {
+            if (empty($submitted_manufacturer) || empty($submitted_location)) {
+                throw new Exception('Manufacturer or Location fields are missing or empty.');
+            }
 
-				global $wpdb;
+            // Query Dealerships Form (ID 235)
+            $dealership_entries = wpforms()->get('entry')->get_entries(['form_id' => 235]);
+            log_message("Found " . count($dealership_entries) . " dealership entries.", $log_file);
 
-        // Debugging: Log when the function is triggered
-        error_log('send_email_to_matching_dealerships triggered');
-        error_log('Customer Manufacturer: ' . $customer_manufacturer);
-        error_log('Customer Location: ' . $customer_location);
+            if (empty($dealership_entries)) {
+                throw new Exception('No entries found in the Dealerships Form.');
+            }
 
-        // Query the database to find matching Dealership entries
-        $query = "
-            SELECT e.entry_id, f.value as dealership_email
-            FROM {$wpdb->prefix}wpforms_entries e
-            JOIN {$wpdb->prefix}wpforms_entry_fields f ON e.entry_id = f.entry_id
-            WHERE e.form_id = %d
-            AND ( f.field_id = 7 AND f.value = %s )  /* Manufacturer in Dealerships Form */
-            AND ( f.field_id = 4 AND f.value = %s )  /* Location in Dealerships Form */";
+            $dealership_emails = [];
+            $customer_data = "Customer Data:\n\n";
 
-        // Prepare and execute the query with Manufacturer and Location fields
-        $results = $wpdb->get_results( $wpdb->prepare( $query, $dealership_form_id, $customer_manufacturer, $customer_location ) );
+            foreach ($dealership_entries as $dealership_entry) {
+                // Decode the fields from JSON string to an associative array
+                $fields_array = json_decode($dealership_entry->fields, true);
+                log_message("Dealership Entry Fields: " . print_r($fields_array, true), $log_file);
 
-        // Debugging: Log the query and the number of results found
-        error_log('SQL Query: ' . $wpdb->last_query);
-        error_log('Number of matching dealerships: ' . count($results));
+                if (is_array($fields_array)) {
+                    $dealer_manufacturer_value = isset($fields_array[7]) ? trim($fields_array[7]['value_raw']) : '';
+                    $dealer_location_value = isset($fields_array[4]) ? trim($fields_array[4]['value_raw']) : '';
+                    $dealer_lead_email_value = isset($fields_array[34]) ? trim($fields_array[34]['value']) : ''; // Email Address to receive leads
 
-        // Loop through the results and send an email to each matching dealership
-        if ( $results ) {
-            foreach ( $results as $dealership ) {
-                // Debugging: Log each dealership email before sending
-                error_log('Sending email to: ' . $dealership->dealership_email);
+                    log_message("Dealer Manufacturer: $dealer_manufacturer_value, Dealer Location: $dealer_location_value", $log_file);
+                    log_message("Comparing with Submitted - Manufacturer: $submitted_manufacturer, Location: $submitted_location", $log_file);
 
-                // Prepare email details
-                $to = $dealership->dealership_email;
-                $subject = 'Incoming Lead from SpotMyRide';
-                $message = 'A new customer inquiry matches your dealership\'s criteria. Here are the details:';
-                // Add details from the Customer Form
-                $message .= "\nCustomer Name: " . $customer_name;
-                $message .= "\nCustomer Email: " . $customer_email;
-                $message .= "\nPhone Number: " . $customer_phone;
-                $message .= "\nLocation: " . $customer_location;
-                $message .= "\nManufacturer: " . $customer_manufacturer;
-                $message .= "\nSpecific Model: " . $customer_specificvehicle;
-                $message .= "\nPrice Range: " . $customer_pricerange;
-                $message .= "\nPreferred Contact Method: " . $customer_contactmethod;
-                $message .= "\nFinancing Options: " . $customer_financeoptions;
-                $message .= "\nCustomer Open to other Suggestions: " . $customer_suggestions;
-                $message .= "\nAdditional Information: " . $customer_message;
-                $message .= "\nConsent: " . $customer_message;
-                $headers = array('Content-Type: text/html; charset=UTF-8');
-
-                // Send email to the dealership
-                if ( ! wp_mail( $to, $subject, $message, $headers ) ) {
-                    error_log('Failed to send email to: ' . $to);
+                    if (strcasecmp($dealer_manufacturer_value, $submitted_manufacturer) === 0 &&
+                        strcasecmp($dealer_location_value, $submitted_location) === 0) {
+                        if (!empty($dealer_lead_email_value)) {
+                            $dealership_emails[] = $dealer_lead_email_value; // Only add if criteria match
+                        }
+                    }
                 } else {
-                    error_log('Email sent successfully to: ' . $to);
+                    log_message("Dealership entry fields are not an array. Actual value: " . print_r($fields_array, true), $log_file);
                 }
             }
-        } else {
-            error_log('No matching dealerships found.');
+
+            if (empty($dealership_emails)) {
+                throw new Exception('No matching dealerships found.');
+            }
+
+            $email['to'] = implode(',', $dealership_emails);
+            log_message("Notification will be sent to: " . implode(', ', $dealership_emails), $log_file);
+
+            // Prepare customer data for email with improved formatting
+            $customer_data .= "Manufacturer: **$submitted_manufacturer**\n";
+            $customer_data .= "Location: **$submitted_location**\n";
+            $customer_data .= "Additional Details:\n";
+
+            foreach ($fields as $field_id => $field_value) {
+                $customer_data .= "  - **Field ID $field_id**: " . (is_array($field_value) ? implode(', ', $field_value) : $field_value['value']) . "\n";
+            }
+
+            // Set email message to include formatted customer data
+            $email['message'] .= "\n" . $customer_data;
+
+            // Log email sending
+            if (wp_mail($email['to'], $email['subject'], $email['message'], $email['headers'])) {
+                log_message("Email sent successfully to: " . $email['to'], $log_file);
+            } else {
+                log_message("Failed to send email to: " . $email['to'], $log_file);
+            }
+
+        } catch (Exception $e) {
+            log_message("Error in sending notifications: " . $e->getMessage(), $log_file);
         }
     }
-}
+
+    return $email;
+}, 10, 5);
