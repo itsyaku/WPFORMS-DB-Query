@@ -10,6 +10,21 @@ add_filter('wpforms_entry_email_atts', function($email, $fields, $entry, $form_d
             error_log($log_entry); // Log to debug.log
         }
 
+        function filter_fields_for_logging($fields) {
+            $filtered_fields = [];
+            foreach ($fields as $field_id => $field_data) {
+                // Exclude fields where type is 'layout' or the value is empty
+                if (isset($field_data['type']) && $field_data['type'] === 'layout') {
+                    continue;
+                }
+                if (empty($field_data['value'])) {
+                    continue;
+                }
+                $filtered_fields[$field_id] = $field_data;
+            }
+            return $filtered_fields;
+        }
+
         $submitted_manufacturer = isset($fields[25]['value']) ? $fields[25]['value'] : null;
         $submitted_location = isset($fields[27]['value']) ? $fields[27]['value'] : null;
         log_message("Submitted Manufacturer: " . $submitted_manufacturer, $log_file);
@@ -29,22 +44,25 @@ add_filter('wpforms_entry_email_atts', function($email, $fields, $entry, $form_d
             }
 
             $dealership_emails = [];
-            $customer_data = "Customer Data:\n\n";
 
             foreach ($dealership_entries as $dealership_entry) {
                 // Decode the fields from JSON string to an associative array
                 $fields_array = json_decode($dealership_entry->fields, true);
-                log_message("Dealership Entry Fields: " . print_r($fields_array, true), $log_file);
+                $filtered_fields_array = filter_fields_for_logging($fields_array); // Filter the fields before logging
+                log_message("Dealership Entry Fields: " . print_r($filtered_fields_array, true), $log_file);
 
-                if (is_array($fields_array)) {
-                    $dealer_manufacturer_value = isset($fields_array[7]) ? trim($fields_array[7]['value_raw']) : '';
-                    $dealer_location_value = isset($fields_array[4]) ? trim($fields_array[4]['value_raw']) : '';
-                    $dealer_lead_email_value = isset($fields_array[34]) ? trim($fields_array[34]['value']) : ''; // Email Address to receive leads
+                if (is_array($filtered_fields_array)) {
+                    $dealer_manufacturer_value = isset($filtered_fields_array[7]) ? trim($filtered_fields_array[7]['value_raw']) : '';
+                    $dealer_location_value = isset($filtered_fields_array[4]) ? trim($filtered_fields_array[4]['value_raw']) : '';
+                    $dealer_lead_email_value = isset($filtered_fields_array[34]) ? trim($filtered_fields_array[34]['value']) : ''; // Email Address to receive leads
+                    $dealer_status_value = isset($filtered_fields_array[42]) ? trim($filtered_fields_array[42]['value']) : 'Inactive'; // Check the Status field
 
-                    log_message("Dealer Manufacturer: $dealer_manufacturer_value, Dealer Location: $dealer_location_value", $log_file);
+                    log_message("Dealer Manufacturer: $dealer_manufacturer_value, Dealer Location: $dealer_location_value, Dealer Status: $dealer_status_value", $log_file);
                     log_message("Comparing with Submitted - Manufacturer: $submitted_manufacturer, Location: $submitted_location", $log_file);
 
-                    if (strcasecmp($dealer_manufacturer_value, $submitted_manufacturer) === 0 &&
+                    // Check for matching manufacturer and location only if status is Active
+                    if ($dealer_status_value === 'Active' &&
+                        strcasecmp($dealer_manufacturer_value, $submitted_manufacturer) === 0 &&
                         strcasecmp($dealer_location_value, $submitted_location) === 0) {
                         if (!empty($dealer_lead_email_value)) {
                             $dealership_emails[] = $dealer_lead_email_value; // Only add if criteria match
@@ -56,29 +74,91 @@ add_filter('wpforms_entry_email_atts', function($email, $fields, $entry, $form_d
             }
 
             if (empty($dealership_emails)) {
-                throw new Exception('No matching dealerships found.');
-            }
+                // Prepare unmatched email subject and body
+                $unmatched_email_subject = "UNMATCHED Lead from SpotMyRide";
+                $unmatched_email_body = "Customer Data:<br><br>";
+                $unmatched_email_body .= "<strong>Manufacturer:</strong> " . esc_html($submitted_manufacturer) . "<br>";
+                $unmatched_email_body .= "<strong>Location:</strong> " . esc_html($submitted_location) . "<br>";
+                $unmatched_email_body .= "<strong>Additional Details:</strong><br>";
 
-            $email['to'] = implode(',', $dealership_emails);
-            log_message("Notification will be sent to: " . implode(', ', $dealership_emails), $log_file);
+                foreach ($fields as $field_id => $field_value) {
+                    // Exclude Field ID 11 from the email
+                    if ($field_id == 11) {
+                        continue;
+                    }
+
+                    $field_label = isset($field_value['name']) ? $field_value['name'] : ''; // Field label
+                    $field_content = isset($field_value['value']) ? $field_value['value'] : ''; // Field value
+                    
+                    // Exclude empty values and non-array fields
+                    if (!empty($field_content) && !is_array($field_content)) {
+                        $unmatched_email_body .= "<strong>" . esc_html($field_label) . ":</strong> " . esc_html($field_content) . "<br>";
+                    }
+                }
+
+                // Send unmatched email to dedicated address
+                $email['to'] = 'yourname@yourdomain.com'; // Dedicated email address for unmatched leads
+                $email['subject'] = $unmatched_email_subject; // Set the new subject line
+                $email['message'] = "<br>" . $unmatched_email_body; // Replaces the default content
+
+                // Ensure HTML content type for email
+                if (!isset($email['headers'])) {
+                    $email['headers'] = [];
+                }
+                $email['headers'][] = 'Content-Type: text/html; charset=UTF-8';
+
+                // Log unmatched email sending
+                if (wp_mail($email['to'], $email['subject'], $email['message'], $email['headers'])) {
+                    log_message("Unmatched email sent successfully to: " . $email['to'], $log_file);
+                } else {
+                    log_message("Failed to send unmatched email to: " . $email['to'], $log_file);
+                }
+
+                // Exit early since we don't need to process matched dealerships anymore
+                return $email;
+            }
 
             // Prepare customer data for email with improved formatting
-            $customer_data .= "Manufacturer: **$submitted_manufacturer**\n";
-            $customer_data .= "Location: **$submitted_location**\n";
-            $customer_data .= "Additional Details:\n";
+            $customer_data = "Customer Data:<br><br>";
+            $customer_data .= "<strong>Manufacturer:</strong> " . esc_html($submitted_manufacturer) . "<br>";
+            $customer_data .= "<strong>Location:</strong> " . esc_html($submitted_location) . "<br>";
+            $customer_data .= "<strong>Additional Details:</strong><br>";
 
             foreach ($fields as $field_id => $field_value) {
-                $customer_data .= "  - **Field ID $field_id**: " . (is_array($field_value) ? implode(', ', $field_value) : $field_value['value']) . "\n";
+                // Exclude Field ID 11 from the email
+                if ($field_id == 11) {
+                    continue;
+                }
+
+                $field_label = isset($field_value['name']) ? $field_value['name'] : ''; // Field label
+                $field_content = isset($field_value['value']) ? $field_value['value'] : ''; // Field value
+                
+                // Exclude empty values and non-array fields
+                if (!empty($field_content) && !is_array($field_content)) {
+                    $customer_data .= "<strong>" . esc_html($field_label) . ":</strong> " . esc_html($field_content) . "<br>";
+                }
             }
 
-            // Set email message to include formatted customer data
-            $email['message'] .= "\n" . $customer_data;
+            // Set email message to include only the custom formatted customer data
+            $email['message'] = "<br>" . $customer_data;  // Replaces the default content, removing {all_fields}
+
+            // Ensure HTML content type for email
+            if (!isset($email['headers'])) {
+                $email['headers'] = [];
+            }
+            $email['headers'][] = 'Content-Type: text/html; charset=UTF-8';
+            
+            // Add BCC headers
+            foreach ($dealership_emails as $bcc_email) {
+                $email['headers'][] = 'BCC: ' . $bcc_email;
+            }
 
             // Log email sending
-            if (wp_mail($email['to'], $email['subject'], $email['message'], $email['headers'])) {
-                log_message("Email sent successfully to: " . $email['to'], $log_file);
+            // Send email with no To field
+            if (wp_mail('', $email['subject'], $email['message'], $email['headers'])) {
+                log_message("Email sent successfully to BCC: " . implode(', ', $dealership_emails), $log_file);
             } else {
-                log_message("Failed to send email to: " . $email['to'], $log_file);
+                log_message("Failed to send email to BCC: " . implode(', ', $dealership_emails), $log_file);
             }
 
         } catch (Exception $e) {
